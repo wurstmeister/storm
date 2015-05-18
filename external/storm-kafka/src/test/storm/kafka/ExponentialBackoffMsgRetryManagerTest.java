@@ -7,17 +7,27 @@ import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 import org.junit.Test;
+import storm.kafka.internal.KafkaMessageId;
 
 public class ExponentialBackoffMsgRetryManagerTest {
 
-    private static final Long TEST_OFFSET = 101L;
-    private static final Long TEST_OFFSET2 = 102L;
+    private static final KafkaMessageId TEST_OFFSET = new KafkaMessageId(new Partition(0), 101L);
+    private static final KafkaMessageId TEST_OFFSET2 = new KafkaMessageId(new Partition(0), 102L);
+
+    private SpoutConfig buildSpoutConfig(long retryInitialDelayMs, double retryDelayMultiplier, long retryDelayMaxMs) {
+        SpoutConfig spoutConfig = new SpoutConfig(null, null, null, null);
+        spoutConfig.retryInitialDelayMs = retryInitialDelayMs;
+        spoutConfig.retryDelayMultiplier = retryDelayMultiplier;
+        spoutConfig.retryDelayMaxMs = retryDelayMaxMs;
+        return spoutConfig;
+    }
 
     @Test
     public void testImmediateRetry() throws Exception {
-        ExponentialBackoffMsgRetryManager manager = new ExponentialBackoffMsgRetryManager(0, 0d, 0);
+        ExponentialBackoffMsgRetryManager manager = new ExponentialBackoffMsgRetryManager();
+        manager.open(buildSpoutConfig(0, 0d, 0));
         manager.failed(TEST_OFFSET);
-        Long next = manager.nextFailedMessageToRetry();
+        KafkaMessageId next = manager.nextFailedMessageToRetry();
         assertEquals("expect test offset next available for retry", TEST_OFFSET, next);
         assertTrue("message should be ready for retry immediately", manager.shouldRetryMsg(TEST_OFFSET));
 
@@ -31,10 +41,11 @@ public class ExponentialBackoffMsgRetryManagerTest {
 
     @Test
     public void testSingleDelay() throws Exception {
-        ExponentialBackoffMsgRetryManager manager = new ExponentialBackoffMsgRetryManager(10, 1d, 100);
+        ExponentialBackoffMsgRetryManager manager = new ExponentialBackoffMsgRetryManager();
+        manager.open(buildSpoutConfig(10, 1d, 100));
         manager.failed(TEST_OFFSET);
         Thread.sleep(5);
-        Long next = manager.nextFailedMessageToRetry();
+        KafkaMessageId next = manager.nextFailedMessageToRetry();
         assertNull("expect no message ready for retry yet", next);
         assertFalse("message should not be ready for retry yet", manager.shouldRetryMsg(TEST_OFFSET));
 
@@ -48,7 +59,8 @@ public class ExponentialBackoffMsgRetryManagerTest {
     public void testExponentialBackoff() throws Exception {
         final long initial = 10;
         final double mult = 2d;
-        ExponentialBackoffMsgRetryManager manager = new ExponentialBackoffMsgRetryManager(initial, mult, initial * 10);
+        ExponentialBackoffMsgRetryManager manager = new ExponentialBackoffMsgRetryManager();
+        manager.open(buildSpoutConfig(initial, mult, initial * 10));
 
         long expectedWaitTime = initial;
         for (long i = 0L; i < 3L; ++i) {
@@ -58,7 +70,7 @@ public class ExponentialBackoffMsgRetryManagerTest {
             assertFalse("message should not be ready for retry yet", manager.shouldRetryMsg(TEST_OFFSET));
 
             Thread.sleep((expectedWaitTime + 1L) / 2L);
-            Long next = manager.nextFailedMessageToRetry();
+            KafkaMessageId next = manager.nextFailedMessageToRetry();
             assertEquals("expect test offset next available for retry", TEST_OFFSET, next);
             assertTrue("message should be ready for retry", manager.shouldRetryMsg(TEST_OFFSET));
 
@@ -72,7 +84,8 @@ public class ExponentialBackoffMsgRetryManagerTest {
         final long initial = 10;
         final double mult = 2d;
         final long max = 20;
-        ExponentialBackoffMsgRetryManager manager = new ExponentialBackoffMsgRetryManager(initial, mult, max);
+        ExponentialBackoffMsgRetryManager manager = new ExponentialBackoffMsgRetryManager();
+        manager.open(buildSpoutConfig(initial, mult, max));
 
         manager.failed(TEST_OFFSET);
         Thread.sleep(initial);
@@ -88,7 +101,7 @@ public class ExponentialBackoffMsgRetryManagerTest {
         assertTrue("message "+TEST_OFFSET+"should be ready for retry", manager.shouldRetryMsg(TEST_OFFSET));
         assertTrue("message "+TEST_OFFSET2+"should be ready for retry", manager.shouldRetryMsg(TEST_OFFSET2));
 
-        Long next = manager.nextFailedMessageToRetry();
+        KafkaMessageId next = manager.nextFailedMessageToRetry();
         assertEquals("expect first message to retry is "+TEST_OFFSET2, TEST_OFFSET2, next);
 
         Thread.sleep(initial);
@@ -110,9 +123,10 @@ public class ExponentialBackoffMsgRetryManagerTest {
 
     @Test
     public void testQueriesAfterRetriedAlready() throws Exception {
-        ExponentialBackoffMsgRetryManager manager = new ExponentialBackoffMsgRetryManager(0, 0d, 0);
+        ExponentialBackoffMsgRetryManager manager = new ExponentialBackoffMsgRetryManager();
+        manager.open(buildSpoutConfig(0, 0d, 0));
         manager.failed(TEST_OFFSET);
-        Long next = manager.nextFailedMessageToRetry();
+        KafkaMessageId next = manager.nextFailedMessageToRetry();
         assertEquals("expect test offset next available for retry", TEST_OFFSET, next);
         assertTrue("message should be ready for retry immediately", manager.shouldRetryMsg(TEST_OFFSET));
 
@@ -124,13 +138,15 @@ public class ExponentialBackoffMsgRetryManagerTest {
 
     @Test(expected = IllegalStateException.class)
     public void testRetryWithoutFail() throws Exception {
-        ExponentialBackoffMsgRetryManager manager = new ExponentialBackoffMsgRetryManager(0, 0d, 0);
+        ExponentialBackoffMsgRetryManager manager = new ExponentialBackoffMsgRetryManager();
+        manager.open(buildSpoutConfig(0, 0d, 0));
         manager.retryStarted(TEST_OFFSET);
     }
 
     @Test(expected = IllegalStateException.class)
     public void testFailRetryRetry() throws Exception {
-        ExponentialBackoffMsgRetryManager manager = new ExponentialBackoffMsgRetryManager(0, 0d, 0);
+        ExponentialBackoffMsgRetryManager manager = new ExponentialBackoffMsgRetryManager();
+        manager.open(buildSpoutConfig(0, 0d, 0));
         manager.failed(TEST_OFFSET);
         try {
             manager.retryStarted(TEST_OFFSET);
@@ -147,7 +163,8 @@ public class ExponentialBackoffMsgRetryManagerTest {
         final long initial = 10;
         final double mult = 2d;
         final long max = 20;
-        ExponentialBackoffMsgRetryManager manager = new ExponentialBackoffMsgRetryManager(initial, mult, max);
+        ExponentialBackoffMsgRetryManager manager = new ExponentialBackoffMsgRetryManager();
+        manager.open(buildSpoutConfig(initial, mult, max));
 
         long expectedWaitTime = initial;
         for (long i = 0L; i < 4L; ++i) {
@@ -157,7 +174,7 @@ public class ExponentialBackoffMsgRetryManagerTest {
             assertFalse("message should not be ready for retry yet", manager.shouldRetryMsg(TEST_OFFSET));
 
             Thread.sleep((expectedWaitTime + 1L) / 2L);
-            Long next = manager.nextFailedMessageToRetry();
+            KafkaMessageId next = manager.nextFailedMessageToRetry();
             assertEquals("expect test offset next available for retry", TEST_OFFSET, next);
             assertTrue("message should be ready for retry", manager.shouldRetryMsg(TEST_OFFSET));
 
@@ -168,26 +185,28 @@ public class ExponentialBackoffMsgRetryManagerTest {
 
     @Test
     public void testFailThenAck() throws Exception {
-        ExponentialBackoffMsgRetryManager manager = new ExponentialBackoffMsgRetryManager(0, 0d, 0);
+        ExponentialBackoffMsgRetryManager manager = new ExponentialBackoffMsgRetryManager();
+        manager.open(buildSpoutConfig(0, 0d, 0));
         manager.failed(TEST_OFFSET);
         assertTrue("message should be ready for retry", manager.shouldRetryMsg(TEST_OFFSET));
 
         manager.acked(TEST_OFFSET);
 
-        Long next = manager.nextFailedMessageToRetry();
+        KafkaMessageId next = manager.nextFailedMessageToRetry();
         assertNull("expect no message ready after acked", next);
         assertFalse("message should not be ready after acked", manager.shouldRetryMsg(TEST_OFFSET));
     }
 
     @Test
     public void testAckThenFail() throws Exception {
-        ExponentialBackoffMsgRetryManager manager = new ExponentialBackoffMsgRetryManager(0, 0d, 0);
+        ExponentialBackoffMsgRetryManager manager = new ExponentialBackoffMsgRetryManager();
+        manager.open(buildSpoutConfig(0, 0d, 0));
         manager.acked(TEST_OFFSET);
         assertFalse("message should not be ready after acked", manager.shouldRetryMsg(TEST_OFFSET));
 
         manager.failed(TEST_OFFSET);
 
-        Long next = manager.nextFailedMessageToRetry();
+        KafkaMessageId next = manager.nextFailedMessageToRetry();
         assertEquals("expect test offset next available for retry", TEST_OFFSET, next);
         assertTrue("message should be ready for retry", manager.shouldRetryMsg(TEST_OFFSET));
     }
