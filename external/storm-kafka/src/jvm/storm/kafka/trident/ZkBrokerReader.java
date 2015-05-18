@@ -51,7 +51,7 @@ public class ZkBrokerReader implements IBrokerReader {
 	@Override
 	public GlobalPartitionInformation getCurrentBrokers() {
 		long currTime = System.currentTimeMillis();
-		if (currTime > lastRefreshTimeMs + refreshMillis) {
+//		if (currTime > lastRefreshTimeMs + refreshMillis) {
 			try {
 				LOG.info("brokers need refreshing because " + refreshMillis + "ms have expired");
 				cachedBrokers = reader.getBrokerInfo();
@@ -59,9 +59,11 @@ public class ZkBrokerReader implements IBrokerReader {
 			} catch (java.net.SocketTimeoutException e) {
 				LOG.warn("Failed to update brokers", e);
 			}
-		}
+//		}
 		return cachedBrokers;
 	}
+
+
 
 	@Override
 	public void close() {

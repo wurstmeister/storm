@@ -38,20 +38,27 @@ import java.util.Properties;
  */
 public class KafkaTestBroker {
 
+    private final int numPartitions;
     private int port;
     private KafkaServerStartable kafka;
     private TestingServer server;
     private CuratorFramework zookeeper;
     private File logDir;
+    private String zookeeperConnectionString;
 
     public KafkaTestBroker() {
+        this(1);
+    }
+
+    public KafkaTestBroker(int numPartitions) {
         try {
             server = new TestingServer();
-            String zookeeperConnectionString = server.getConnectString();
+            zookeeperConnectionString = server.getConnectString();
             ExponentialBackoffRetry retryPolicy = new ExponentialBackoffRetry(1000, 3);
             zookeeper = CuratorFrameworkFactory.newClient(zookeeperConnectionString, retryPolicy);
             zookeeper.start();
             port = InstanceSpec.getRandomPort();
+            this.numPartitions = numPartitions;
             logDir = new File(System.getProperty("java.io.tmpdir"), "kafka/logs/kafka-test-" + port);
             KafkaConfig config = buildKafkaConfig(zookeeperConnectionString);
             kafka = new KafkaServerStartable(config);
@@ -66,6 +73,8 @@ public class KafkaTestBroker {
         p.setProperty("zookeeper.connect", zookeeperConnectionString);
         p.setProperty("broker.id", "0");
         p.setProperty("port", "" + port);
+        p.setProperty("num.partitions", "" + numPartitions);
+        p.setProperty("partitioner.class", KeyBasedPartitioner.class.getName());
         p.setProperty("log.dirs", logDir.getAbsolutePath());
         return new KafkaConfig(p);
     }

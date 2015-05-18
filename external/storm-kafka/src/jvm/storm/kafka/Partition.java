@@ -36,9 +36,13 @@ public class Partition implements ISpoutPartition {
         this.partition = partition;
     }
 
+    public Partition(int partition) {
+        this.partition = partition;
+    }
+
     @Override
     public int hashCode() {
-        return Objects.hashCode(host, partition);
+        return Objects.hashCode(partition);
     }
 
     @Override
@@ -50,7 +54,7 @@ public class Partition implements ISpoutPartition {
             return false;
         }
         final Partition other = (Partition) obj;
-        return Objects.equal(this.host, other.host) && Objects.equal(this.partition, other.partition);
+        return Objects.equal(this.partition, other.partition);
     }
 
     @Override
