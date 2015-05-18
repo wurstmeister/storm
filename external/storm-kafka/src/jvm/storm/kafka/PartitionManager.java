@@ -17,20 +17,17 @@
  */
 package storm.kafka;
 
-import backtype.storm.Config;
 import backtype.storm.metric.api.CombinedMetric;
 import backtype.storm.metric.api.CountMetric;
 import backtype.storm.metric.api.MeanReducer;
 import backtype.storm.metric.api.ReducedMetric;
 import backtype.storm.spout.SpoutOutputCollector;
-import com.google.common.collect.ImmutableMap;
 import kafka.javaapi.consumer.SimpleConsumer;
 import kafka.javaapi.message.ByteBufferMessageSet;
 import kafka.message.MessageAndOffset;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import storm.kafka.KafkaSpout.EmitState;
-import storm.kafka.KafkaSpout.MessageAndRealOffset;
+import storm.kafka.internal.KafkaMessageId;
 import storm.kafka.trident.MaxMetric;
 
 import java.util.*;
@@ -46,74 +43,45 @@ public class PartitionManager {
     // _pending key = Kafka offset, value = time at which the message was first submitted to the topology
     private SortedMap<Long,Long> _pending = new TreeMap<Long,Long>();
     private final FailedMsgRetryManager _failedMsgRetryManager;
-
-    // retryRecords key = Kafka offset, value = retry info for the given message
-    Long _committedTo;
-    LinkedList<MessageAndRealOffset> _waitingToEmit = new LinkedList<MessageAndRealOffset>();
+    LinkedList<MessageAndOffset> _waitingToEmit = new LinkedList<MessageAndOffset>();
     Partition _partition;
-    SpoutConfig _spoutConfig;
-    String _topologyInstanceId;
+    KafkaConfig _spoutConfig;
     SimpleConsumer _consumer;
     DynamicPartitionConnections _connections;
-    ZkState _state;
     Map _stormConf;
     long numberFailed, numberAcked;
-    public PartitionManager(DynamicPartitionConnections connections, String topologyInstanceId, ZkState state, Map stormConf, SpoutConfig spoutConfig, Partition id) {
-        _partition = id;
+
+    enum EmitState {
+        EMITTED_MORE_LEFT,
+        EMITTED_END,
+        NO_EMITTED
+    }
+
+    public PartitionManager(DynamicPartitionConnections connections, Map stormConf, KafkaConfig spoutConfig, Partition id) {
         _connections = connections;
         _spoutConfig = spoutConfig;
-        _topologyInstanceId = topologyInstanceId;
-        _consumer = connections.register(id.host, id.partition);
-        _state = state;
+        _partition = updateBroker(id);
         _stormConf = stormConf;
         numberAcked = numberFailed = 0;
 
         _failedMsgRetryManager = new ExponentialBackoffMsgRetryManager(_spoutConfig.retryInitialDelayMs,
                                                                            _spoutConfig.retryDelayMultiplier,
                                                                            _spoutConfig.retryDelayMaxMs);
-
-        String jsonTopologyId = null;
-        Long jsonOffset = null;
-        String path = committedPath();
-        try {
-            Map<Object, Object> json = _state.readJSON(path);
-            LOG.info("Read partition information from: " + path +  "  --> " + json );
-            if (json != null) {
-                jsonTopologyId = (String) ((Map<Object, Object>) json.get("topology")).get("id");
-                jsonOffset = (Long) json.get("offset");
-            }
-        } catch (Throwable e) {
-            LOG.warn("Error reading and/or parsing at ZkNode: " + path, e);
-        }
-
-        Long currentOffset = KafkaUtils.getOffset(_consumer, spoutConfig.topic, id.partition, spoutConfig);
-
-        if (jsonTopologyId == null || jsonOffset == null) { // failed to parse JSON?
-            _committedTo = currentOffset;
-            LOG.info("No partition information found, using configuration to determine offset");
-        } else if (!topologyInstanceId.equals(jsonTopologyId) && spoutConfig.ignoreZkOffsets) {
-            _committedTo = KafkaUtils.getOffset(_consumer, spoutConfig.topic, id.partition, spoutConfig.startOffsetTime);
-            LOG.info("Topology change detected and ignore zookeeper offsets set to true, using configuration to determine offset");
-        } else {
-            _committedTo = jsonOffset;
-            LOG.info("Read last commit offset from zookeeper: " + _committedTo + "; old topology_id: " + jsonTopologyId + " - new topology_id: " + topologyInstanceId );
-        }
-
-        if (currentOffset - _committedTo > spoutConfig.maxOffsetBehind || _committedTo <= 0) {
-            LOG.info("Last commit offset from zookeeper: " + _committedTo);
-            Long lastCommittedOffset = _committedTo;
-            _committedTo = currentOffset;
-            LOG.info("Commit offset " + lastCommittedOffset + " is more than " +
-                    spoutConfig.maxOffsetBehind + " behind latest offset " + currentOffset + ", resetting to startOffsetTime=" + spoutConfig.startOffsetTime);
-        }
-
-        LOG.info("Starting Kafka " + _consumer.host() + ":" + id.partition + " from offset " + _committedTo);
-        _emittedToOffset = _committedTo;
-
         _fetchAPILatencyMax = new CombinedMetric(new MaxMetric());
         _fetchAPILatencyMean = new ReducedMetric(new MeanReducer());
         _fetchAPICallCount = new CountMetric();
         _fetchAPIMessageCount = new CountMetric();
+    }
+
+
+    private Partition updateBroker(Partition id) {
+        if ( id.host != null ) {
+            _connections.unregister(_partition);
+        }
+        Broker broker = _connections._reader.getCurrentBrokers().getBrokerFor(id.partition);
+        id = new Partition(broker, id.partition);
+        _consumer = _connections.register(id);
+        return id;
     }
 
     public Map getMetricsDataMap() {
@@ -125,24 +93,35 @@ public class PartitionManager {
         return ret;
     }
 
-    //returns false if it's reached the end of current batch
+
+    /**
+     * Emits a set of tuples generated by one kafka message from our partition.
+     *
+     * If more than one message is read during a fetch, they will be buffered and emitted on subsequent
+     * calls to this method.
+     *
+     * If you don't want messages to be buffered use @see PartitionManager#unbufferedNext
+     *
+     * @param collector
+     * @return
+     */
     public EmitState next(SpoutOutputCollector collector) {
         if (_waitingToEmit.isEmpty()) {
             fill();
         }
         while (true) {
-            MessageAndRealOffset toEmit = _waitingToEmit.pollFirst();
+            MessageAndOffset toEmit = _waitingToEmit.pollFirst();
             if (toEmit == null) {
                 return EmitState.NO_EMITTED;
             }
-            Iterable<List<Object>> tups = KafkaUtils.generateTuples(_spoutConfig, toEmit.msg);
+            Iterable<List<Object>> tups = KafkaUtils.generateTuples(_spoutConfig, toEmit.message());
             if (tups != null) {
                 for (List<Object> tup : tups) {
-                    collector.emit(tup, new KafkaMessageId(_partition, toEmit.offset));
+                    collector.emit(tup, new KafkaMessageId(_partition, toEmit.offset()));
                 }
                 break;
             } else {
-                ack(toEmit.offset);
+                ack(toEmit.offset());
             }
         }
         if (!_waitingToEmit.isEmpty()) {
@@ -172,6 +151,8 @@ public class PartitionManager {
             LOG.warn("Using new offset: {}", _emittedToOffset);
             // fetch failed, so don't update the metrics
             return;
+        } catch (FailedFetchException fEx) {
+            _partition = updateBroker(_partition);
         }
         long end = System.nanoTime();
         long millis = (end - start) / 1000000;
@@ -192,7 +173,7 @@ public class PartitionManager {
                     if (!_pending.containsKey(cur_offset)) {
                         _pending.put(cur_offset, System.currentTimeMillis());
                     }
-                    _waitingToEmit.add(new MessageAndRealOffset(msg.message(), cur_offset));
+                    _waitingToEmit.add(msg);
                     _emittedToOffset = Math.max(msg.nextOffset(), _emittedToOffset);
                     if (_failedMsgRetryManager.shouldRetryMsg(cur_offset)) {
                         this._failedMsgRetryManager.retryStarted(cur_offset);
@@ -231,39 +212,6 @@ public class PartitionManager {
         }
     }
 
-    public void commit() {
-        long lastCompletedOffset = lastCompletedOffset();
-        if (_committedTo != lastCompletedOffset) {
-            LOG.debug("Writing last completed offset (" + lastCompletedOffset + ") to ZK for " + _partition + " for topology: " + _topologyInstanceId);
-            Map<Object, Object> data = (Map<Object, Object>) ImmutableMap.builder()
-                    .put("topology", ImmutableMap.of("id", _topologyInstanceId,
-                            "name", _stormConf.get(Config.TOPOLOGY_NAME)))
-                    .put("offset", lastCompletedOffset)
-                    .put("partition", _partition.partition)
-                    .put("broker", ImmutableMap.of("host", _partition.host.host,
-                            "port", _partition.host.port))
-                    .put("topic", _spoutConfig.topic).build();
-            _state.writeJSON(committedPath(), data);
-
-            _committedTo = lastCompletedOffset;
-            LOG.debug("Wrote last completed offset (" + lastCompletedOffset + ") to ZK for " + _partition + " for topology: " + _topologyInstanceId);
-        } else {
-            LOG.debug("No new offset for " + _partition + " for topology: " + _topologyInstanceId);
-        }
-    }
-
-    private String committedPath() {
-        return _spoutConfig.zkRoot + "/" + _spoutConfig.id + "/" + _partition.getId();
-    }
-
-    public long lastCompletedOffset() {
-        if (_pending.isEmpty()) {
-            return _emittedToOffset;
-        } else {
-            return _pending.firstKey();
-        }
-    }
-
     public Partition getPartition() {
         return _partition;
     }
@@ -272,13 +220,16 @@ public class PartitionManager {
         _connections.unregister(_partition.host, _partition.partition);
     }
 
-    static class KafkaMessageId {
-        public Partition partition;
-        public long offset;
-
-        public KafkaMessageId(Partition partition, long offset) {
-            this.partition = partition;
-            this.offset = offset;
-        }
+    public void setOffset(long offset) {
+        this._emittedToOffset = offset;
     }
+
+    public long getOffset() {
+        return _emittedToOffset;
+    }
+
+    public SimpleConsumer getConsumer() {
+        return _consumer;
+    }
+
 }

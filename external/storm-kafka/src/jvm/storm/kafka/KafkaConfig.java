@@ -39,6 +39,13 @@ public class KafkaConfig implements Serializable {
     public boolean useStartOffsetTimeIfOffsetOutOfRange = true;
     public int metricsTimeBucketSizeInSecs = 60;
 
+
+    // Exponential back-off retry settings.  These are used when retrying messages after a bolt
+    // calls OutputCollector.fail().
+    public long retryInitialDelayMs = 0;
+    public double retryDelayMultiplier = 1.0;
+    public long retryDelayMaxMs = 60 * 1000;
+
     public KafkaConfig(BrokerHosts hosts, String topic) {
         this(hosts, topic, kafka.api.OffsetRequest.DefaultClientId());
     }
