@@ -42,7 +42,6 @@ public class PartitionManager {
     Long _emittedToOffset;
     // _pending key = Kafka offset, value = time at which the message was first submitted to the topology
     private SortedMap<Long,Long> _pending = new TreeMap<Long,Long>();
-    private final FailedMsgRetryManager _failedMsgRetryManager;
     LinkedList<MessageAndOffset> _waitingToEmit = new LinkedList<MessageAndOffset>();
     Partition _partition;
     KafkaConfig _spoutConfig;
@@ -64,9 +63,7 @@ public class PartitionManager {
         _stormConf = stormConf;
         numberAcked = numberFailed = 0;
 
-        _failedMsgRetryManager = new ExponentialBackoffMsgRetryManager(_spoutConfig.retryInitialDelayMs,
-                                                                           _spoutConfig.retryDelayMultiplier,
-                                                                           _spoutConfig.retryDelayMaxMs);
+
         _fetchAPILatencyMax = new CombinedMetric(new MaxMetric());
         _fetchAPILatencyMean = new ReducedMetric(new MeanReducer());
         _fetchAPICallCount = new CountMetric();
@@ -134,18 +131,9 @@ public class PartitionManager {
 
     private void fill() {
         long start = System.nanoTime();
-        Long offset;
-
-        // Are there failed tuples? If so, fetch those first.
-        offset = this._failedMsgRetryManager.nextFailedMessageToRetry();
-        final boolean processingNewTuples = (offset == null);
-        if (processingNewTuples) {
-            offset = _emittedToOffset;
-        }
-
         ByteBufferMessageSet msgs = null;
         try {
-            msgs = KafkaUtils.fetchMessages(_spoutConfig, _consumer, _partition, offset);
+            msgs = KafkaUtils.fetchMessages(_spoutConfig, _consumer, _partition, _emittedToOffset);
         } catch (TopicOffsetOutOfRangeException e) {
             _emittedToOffset = KafkaUtils.getOffset(_consumer, _spoutConfig.topic, _partition.partition, kafka.api.OffsetRequest.EarliestTime());
             LOG.warn("Using new offset: {}", _emittedToOffset);
@@ -161,24 +149,19 @@ public class PartitionManager {
         _fetchAPICallCount.incr();
         if (msgs != null) {
             int numMessages = 0;
-
             for (MessageAndOffset msg : msgs) {
                 final Long cur_offset = msg.offset();
-                if (cur_offset < offset) {
+                // TODO: this should be done in fetchMessages
+                if (cur_offset < _emittedToOffset) {
                     // Skip any old offsets.
                     continue;
                 }
-                if (processingNewTuples || this._failedMsgRetryManager.shouldRetryMsg(cur_offset)) {
-                    numMessages += 1;
-                    if (!_pending.containsKey(cur_offset)) {
-                        _pending.put(cur_offset, System.currentTimeMillis());
-                    }
-                    _waitingToEmit.add(msg);
-                    _emittedToOffset = Math.max(msg.nextOffset(), _emittedToOffset);
-                    if (_failedMsgRetryManager.shouldRetryMsg(cur_offset)) {
-                        this._failedMsgRetryManager.retryStarted(cur_offset);
-                    }
+                numMessages += 1;
+                if (!_pending.containsKey(cur_offset)) {
+                    _pending.put(cur_offset, System.currentTimeMillis());
                 }
+                _waitingToEmit.add(msg);
+                _emittedToOffset = Math.max(msg.nextOffset(), _emittedToOffset);
             }
             _fetchAPIMessageCount.incrBy(numMessages);
         }
@@ -190,7 +173,6 @@ public class PartitionManager {
             _pending.headMap(offset - _spoutConfig.maxOffsetBehind).clear();
         }
         _pending.remove(offset);
-        this._failedMsgRetryManager.acked(offset);
         numberAcked++;
     }
 
@@ -207,8 +189,6 @@ public class PartitionManager {
             if (numberAcked == 0 && numberFailed > _spoutConfig.maxOffsetBehind) {
                 throw new RuntimeException("Too many tuple failures");
             }
-
-            this._failedMsgRetryManager.failed(offset);
         }
     }
 
@@ -222,6 +202,7 @@ public class PartitionManager {
 
     public void setOffset(long offset) {
         this._emittedToOffset = offset;
+        _waitingToEmit.clear();
     }
 
     public long getOffset() {

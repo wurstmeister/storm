@@ -17,39 +17,38 @@
  */
 package storm.kafka;
 
-import java.util.Comparator;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.PriorityQueue;
-import java.util.Queue;
+import storm.kafka.internal.KafkaMessageId;
+
+import java.util.*;
 
 public class ExponentialBackoffMsgRetryManager implements FailedMsgRetryManager {
 
-    private final long retryInitialDelayMs;
-    private final double retryDelayMultiplier;
-    private final long retryDelayMaxMs;
+    private long retryInitialDelayMs;
+    private double retryDelayMultiplier;
+    private long retryDelayMaxMs;
 
     private Queue<MessageRetryRecord> waiting = new PriorityQueue<MessageRetryRecord>(11, new RetryTimeComparator());
-    private Map<Long,MessageRetryRecord> records = new HashMap<Long,MessageRetryRecord>();
+    private Map<KafkaMessageId,MessageRetryRecord> records = new HashMap<KafkaMessageId,MessageRetryRecord>();
 
-    public ExponentialBackoffMsgRetryManager(long retryInitialDelayMs, double retryDelayMultiplier, long retryDelayMaxMs) {
-        this.retryInitialDelayMs = retryInitialDelayMs;
-        this.retryDelayMultiplier = retryDelayMultiplier;
-        this.retryDelayMaxMs = retryDelayMaxMs;
+    @Override
+    public void open(SpoutConfig spoutConfig) {
+        this.retryInitialDelayMs = spoutConfig.retryInitialDelayMs;
+        this.retryDelayMultiplier = spoutConfig.retryDelayMultiplier;
+        this.retryDelayMaxMs = spoutConfig.retryDelayMaxMs;
     }
 
     @Override
-    public void failed(Long offset) {
-        MessageRetryRecord oldRecord = this.records.get(offset);
+    public void failed(KafkaMessageId messageId) {
+        MessageRetryRecord oldRecord = this.records.get(messageId);
         MessageRetryRecord newRecord = oldRecord == null ?
-                                       new MessageRetryRecord(offset) :
+                                       new MessageRetryRecord(messageId) :
                                        oldRecord.createNextRetryRecord();
-        this.records.put(offset, newRecord);
+        this.records.put(messageId, newRecord);
         this.waiting.add(newRecord);
     }
 
     @Override
-    public void acked(Long offset) {
+    public void acked(KafkaMessageId offset) {
         MessageRetryRecord record = this.records.remove(offset);
         if (record != null) {
             this.waiting.remove(record);
@@ -57,8 +56,8 @@ public class ExponentialBackoffMsgRetryManager implements FailedMsgRetryManager 
     }
 
     @Override
-    public void retryStarted(Long offset) {
-        MessageRetryRecord record = this.records.get(offset);
+    public void retryStarted(KafkaMessageId messageId) {
+        MessageRetryRecord record = this.records.get(messageId);
         if (record == null || !this.waiting.contains(record)) {
             throw new IllegalStateException("cannot retry a message that has not failed");
         } else {
@@ -67,12 +66,12 @@ public class ExponentialBackoffMsgRetryManager implements FailedMsgRetryManager 
     }
 
     @Override
-    public Long nextFailedMessageToRetry() {
+    public KafkaMessageId nextFailedMessageToRetry() {
         if (this.waiting.size() > 0) {
             MessageRetryRecord first = this.waiting.peek();
             if (System.currentTimeMillis() >= first.retryTimeUTC) {
-                if (this.records.containsKey(first.offset)) {
-                    return first.offset;
+                if (this.records.containsKey(first.messageId)) {
+                    return first.messageId;
                 } else {
                     // defensive programming - should be impossible
                     this.waiting.remove(first);
@@ -84,8 +83,8 @@ public class ExponentialBackoffMsgRetryManager implements FailedMsgRetryManager 
     }
 
     @Override
-    public boolean shouldRetryMsg(Long offset) {
-        MessageRetryRecord record = this.records.get(offset);
+    public boolean shouldRetryMsg(KafkaMessageId messageId) {
+        MessageRetryRecord record = this.records.get(messageId);
         return record != null &&
                 this.waiting.contains(record) &&
                 System.currentTimeMillis() >= record.retryTimeUTC;
@@ -105,16 +104,16 @@ public class ExponentialBackoffMsgRetryManager implements FailedMsgRetryManager 
      * </ul>
      */
     class MessageRetryRecord {
-        private final long offset;
+        private final KafkaMessageId messageId;
         private final int retryNum;
         private final long retryTimeUTC;
 
-        public MessageRetryRecord(long offset) {
-            this(offset, 1);
+        public MessageRetryRecord(KafkaMessageId messageId) {
+            this(messageId, 1);
         }
 
-        private MessageRetryRecord(long offset, int retryNum) {
-            this.offset = offset;
+        private MessageRetryRecord(KafkaMessageId messageId, int retryNum) {
+            this.messageId = messageId;
             this.retryNum = retryNum;
             this.retryTimeUTC = System.currentTimeMillis() + calculateRetryDelay();
         }
@@ -127,7 +126,7 @@ public class ExponentialBackoffMsgRetryManager implements FailedMsgRetryManager 
          *         configuration.
          */
         public MessageRetryRecord createNextRetryRecord() {
-            return new MessageRetryRecord(this.offset, this.retryNum + 1);
+            return new MessageRetryRecord(this.messageId, this.retryNum + 1);
         }
 
         private long calculateRetryDelay() {
@@ -141,14 +140,20 @@ public class ExponentialBackoffMsgRetryManager implements FailedMsgRetryManager 
         }
 
         @Override
-        public boolean equals(Object other) {
-            return (other instanceof MessageRetryRecord
-                    && this.offset == ((MessageRetryRecord) other).offset);
+        public int hashCode() {
+            return Objects.hash(messageId);
         }
 
         @Override
-        public int hashCode() {
-            return Long.valueOf(this.offset).hashCode();
+        public boolean equals(Object obj) {
+            if (this == obj) {
+                return true;
+            }
+            if (obj == null || getClass() != obj.getClass()) {
+                return false;
+            }
+            final MessageRetryRecord other = (MessageRetryRecord) obj;
+            return Objects.equals(this.messageId, other.messageId);
         }
     }
 

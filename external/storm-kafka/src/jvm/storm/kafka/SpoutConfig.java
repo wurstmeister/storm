@@ -25,6 +25,16 @@ public class SpoutConfig extends KafkaConfig implements Serializable {
     public String zkRoot = null;
     public String id = null;
 
+
+    // Exponential back-off retry settings.  These are used when retrying messages after a bolt
+    // calls OutputCollector.fail().
+    public long retryInitialDelayMs = 0;
+    public double retryDelayMultiplier = 1.0;
+    public long retryDelayMaxMs = 60 * 1000;
+
+    public String retryHandlerClassName = DefaultFailedMessageRetryHandler.class.getName();
+
+
     // setting for how often to save the current kafka offset to ZooKeeper
     public long stateUpdateIntervalMs = 2000;
 

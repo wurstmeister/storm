@@ -52,6 +52,7 @@ public class KafkaSpout extends BaseRichSpout {
     private StateHandler stateHandler;
     private Map stormConf;
     private Map<Integer, MessageHandler> messageHandlers;
+    private FailedMsgRetryManager failedMsgRetryManager;
 
 
     public KafkaSpout(SpoutConfig spoutConf) {
@@ -92,6 +93,14 @@ public class KafkaSpout extends BaseRichSpout {
             }
             messageHandlers.put(topicPartition.partition, new MessageHandler(offset));
         }
+        try {
+            failedMsgRetryManager = (FailedMsgRetryManager) Class.forName(spoutConfig.retryHandlerClassName).getConstructor().newInstance();
+        } catch (Exception e) {
+            LOG.warn(String.format("Could not initialize failed message retry handler '%s', using default",
+                    spoutConfig.retryHandlerClassName), e);
+            failedMsgRetryManager = new DefaultFailedMessageRetryHandler();
+        }
+        failedMsgRetryManager.open(spoutConfig);
     }
 
 
@@ -120,11 +129,20 @@ public class KafkaSpout extends BaseRichSpout {
 
     @Override
     public void nextTuple() {
+
+        KafkaMessageId messageToRetry = failedMsgRetryManager.nextFailedMessageToRetry();
+        if (failedMsgRetryManager.shouldRetryMsg(messageToRetry)) {
+            failedMsgRetryManager.retryStarted(messageToRetry);
+            consumer.seek(messageToRetry.getPartition(), messageToRetry.getOffset());
+        }
+
         List<StormKafkaRecord> records = consumer.poll();
         for (StormKafkaRecord record : records) {
             KafkaMessageId messageId = record.getMessageId();
-            collector.emit(record.getTuple(), messageId);
-            messageHandlers.get(messageId.getPartition().partition).add(messageId);
+            if  (messageToRetry == null || failedMsgRetryManager.shouldRetryMsg(messageId)) {
+                collector.emit(record.getTuple(), messageId);
+                messageHandlers.get(messageId.getPartition().partition).add(messageId);
+            }
         }
         long now = System.currentTimeMillis();
         if ((now - lastUpdateMs) > spoutConfig.stateUpdateIntervalMs) {
@@ -135,15 +153,19 @@ public class KafkaSpout extends BaseRichSpout {
     @Override
     public void ack(Object msgId) {
         KafkaMessageId id = (KafkaMessageId) msgId;
-        messageHandlers.get(id.getPartition().partition).ack(id);
+        MessageHandler messageHandler = messageHandlers.get(id.getPartition().partition);
+        messageHandler.ack(id);
         consumer.finish(id);
+        failedMsgRetryManager.acked(id);
     }
 
     @Override
     public void fail(Object msgId) {
         KafkaMessageId id = (KafkaMessageId) msgId;
-        messageHandlers.get(id.getPartition().partition).fail(id);
+        MessageHandler messageHandler = messageHandlers.get(id.getPartition().partition);
+        messageHandler.fail(id);
         consumer.fail(id);
+        failedMsgRetryManager.failed(id);
     }
 
     @Override

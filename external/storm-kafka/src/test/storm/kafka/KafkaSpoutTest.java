@@ -19,7 +19,8 @@ import storm.kafka.trident.GlobalPartitionInformation;
 
 import java.util.List;
 
-import static org.junit.Assert.*;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 import static org.mockito.Matchers.any;
 import static org.mockito.Matchers.anyString;
 import static org.mockito.Mockito.verify;
@@ -106,7 +107,7 @@ public class KafkaSpoutTest {
     private void setupConfigWithNPartitions(int numPartitions) {
         broker = new KafkaTestBroker(numPartitions);
         GlobalPartitionInformation globalPartitionInformation = new GlobalPartitionInformation();
-        for (int partition = 0 ; partition < numPartitions; partition ++) {
+        for (int partition = 0; partition < numPartitions; partition++) {
             globalPartitionInformation.addPartition(partition, Broker.fromString(broker.getBrokerConnectionString()));
         }
         brokerHosts = new StaticHosts(globalPartitionInformation);
@@ -127,7 +128,7 @@ public class KafkaSpoutTest {
         setupConfigWithNPartitions(1);
 
         String value = "value";
-        for ( int i = 0; i < 10; i++) {
+        for (int i = 0; i < 10; i++) {
             TestUtils.createTopicAndSendMessage(broker, config.topic, "0", value + i);
         }
 
@@ -136,7 +137,7 @@ public class KafkaSpoutTest {
         KafkaSpout spout = buildKafkaSpout(capture);
 
         long lastAcked = 0;
-        for ( int i = 0 ; i < 4 ; i++) {
+        for (int i = 0; i < 4; i++) {
             spout.nextTuple();
             List<StormKafkaRecord> records = capture.getRecords();
             assertEquals(records.size(), 1);
@@ -152,7 +153,7 @@ public class KafkaSpoutTest {
         spout.nextTuple();
 
         ArgumentCaptor<Long> argument = ArgumentCaptor.forClass(Long.class);
-        verify(stateHandler).persist(any(Partition.class), anyString(), argument.capture(), anyString(), anyString() );
+        verify(stateHandler).persist(any(Partition.class), anyString(), argument.capture(), anyString(), anyString());
         assertEquals(Long.valueOf(lastAcked), argument.getValue());
 
     }
@@ -191,5 +192,45 @@ public class KafkaSpoutTest {
     }
 
 
-    //test failed tuples
+    @Test
+    public void testWithRetryManager() throws Exception {
+
+        setupConfigWithNPartitions(1);
+        config.retryHandlerClassName = TestRetryManager.class.getName();
+        String value = "value";
+        String testValue = value + 0;
+        String key = "0";
+        TestUtils.createTopicAndSendMessage(broker, config.topic, key, testValue);
+        String testValue1 = value + 1;
+        TestUtils.createTopicAndSendMessage(broker, config.topic, key, testValue1);
+
+        CapturingSpoutCollector capture = new CapturingSpoutCollector();
+        KafkaSpout spout = buildKafkaSpout(capture);
+
+        spout.nextTuple();
+        List<StormKafkaRecord> records = capture.getRecords();
+
+        StormKafkaRecord record = verifyRecord(testValue, records);
+
+        spout.fail(record.getMessageId());
+
+        capture.reset();
+        spout.nextTuple();
+
+        record = verifyRecord(testValue, records);
+
+        spout.ack(record.getMessageId());
+
+        capture.reset();
+        spout.nextTuple();
+
+        verifyRecord(testValue1, records);
+    }
+
+    private StormKafkaRecord verifyRecord(String expected, List<StormKafkaRecord> records) {
+        assertEquals(records.size(), 1);
+        StormKafkaRecord record = records.get(0);
+        assertEquals(expected, record.getTuple().get(0));
+        return record;
+    }
 }

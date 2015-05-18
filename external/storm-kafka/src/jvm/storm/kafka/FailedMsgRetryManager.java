@@ -17,10 +17,14 @@
  */
 package storm.kafka;
 
+import storm.kafka.internal.KafkaMessageId;
+
 public interface FailedMsgRetryManager {
-    public void failed(Long offset);
-    public void acked(Long offset);
-    public void retryStarted(Long offset);
-    public Long nextFailedMessageToRetry();
-    public boolean shouldRetryMsg(Long offset);
+
+    public void open(SpoutConfig kafkaConfig);
+    public void failed(KafkaMessageId messageId);
+    public void acked(KafkaMessageId offset);
+    public void retryStarted(KafkaMessageId offset);
+    public KafkaMessageId nextFailedMessageToRetry();
+    public boolean shouldRetryMsg(KafkaMessageId offset);
 }
